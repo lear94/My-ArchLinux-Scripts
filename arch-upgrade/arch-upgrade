@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# Enable strict mode (optional, if you prefer handling errors manually)
+#set -e
+
+# Function to handle sudo privileges with a single prompt
+ask_sudo() {
+    sudo -v
+    while sleep 60; do sudo -n true 2>/dev/null || break; done &
+    SUDO_PID=$!
+}
+
+# Cleanup function to be executed at the end of the script
+cleanup() {
+    echo "Cleaning up..."
+    sudo -k  # Reset sudo timeout
+    [ -n "$SUDO_PID" ] && kill "$SUDO_PID" 2>/dev/null
+    exit 0
+}
+
+# Capture SIGINT (Ctrl+C) and SIGTERM signals to trigger cleanup
+trap cleanup SIGINT SIGTERM EXIT
+
+# Function to check internet connection before proceeding
+check_connection() {
+    echo "Checking internet connection..."
+    if ! ping -c 1 archlinux.org &> /dev/null; then
+        echo "No internet connection detected. Aborting." >&2
+        exit 1
+    fi
+}
+
+# Main function to upgrade Arch Linux system
+arch-upgrade() {
+    local verbose=false
+    while getopts ":v" opt; do
+        case $opt in
+            v) verbose=true ;;
+            \?) echo "Invalid option -$OPTARG" >&2; return 1 ;;
+        esac
+    done
+
+    ask_sudo
+    check_connection
+    clear
+    local total_steps=8
+    local current_step=0
+
+    # Define redirection based on verbosity
+    if $verbose; then
+        redirect=""
+    else
+        redirect="> /dev/null 2>&1"
+    fi
+
+    echo "Updating mirrorlist..."
+    eval "sudo reflector --latest 20 --country 'US' --sort rate --protocol https --download-timeout 15 --exclude 'soulharsh007.dev' --save /etc/pacman.d/mirrorlist $redirect"
+    ((current_step++))
+    echo "Mirrorlist updated: $((current_step * 100 / total_steps))%"
+
+    echo "Checking and updating keyring..."
+    if ! pacman -Q archlinux-keyring &> /dev/null || ! pacman -Q archlinux-keyring | grep -q "$(pacman -Si archlinux-keyring | awk '/^Version/ {print $3}')"; then
+        eval "sudo pacman -S --noconfirm archlinux-keyring $redirect"
+    fi
+    ((current_step++))
+    echo "Keyring updated: $((current_step * 100 / total_steps))%"
+
+    echo "Refreshing keys..."
+    eval "sudo pacman-key --refresh-keys $redirect"
+    ((current_step++))
+    echo "Keys refreshed: $((current_step * 100 / total_steps))%"
+
+    echo "Updating system..."
+    eval "sudo pacman -Syyu --noconfirm $redirect"
+    ((current_step++))
+    echo "System updated: $((current_step * 100 / total_steps))%"
+
+    # Update AUR (if yay is installed)
+    if command -v yay &> /dev/null; then
+        echo "Updating AUR packages..."
+        eval "yay -Syu --noconfirm $redirect"
+        ((current_step++))
+        echo "AUR packages updated: $((current_step * 100 / total_steps))%"
+    else
+        echo "AUR tool (yay) not found. Skipping AUR update."
+        ((current_step++))
+    fi
+
+    echo "Removing orphaned packages..."
+    orphans=$(pacman -Qdtq || true)  # Avoid error if no orphans are found
+    if [ -n "$orphans" ]; then
+        eval "sudo pacman -Rns --noconfirm $orphans $redirect"
+        echo "Orphaned packages removed."
+    else
+        echo "No orphaned packages found."
+    fi
+    ((current_step++))
+    echo "Orphans removed: $((current_step * 100 / total_steps))%"
+
+    echo "Cleaning package cache..."
+    if command -v paccache &> /dev/null; then
+        eval "sudo paccache -r $redirect"
+        echo "Cache cleaned."
+    else
+        echo "paccache not found. Installing pacman-contrib..."
+        eval "sudo pacman -S --noconfirm pacman-contrib $redirect"
+        eval "sudo paccache -r $redirect"
+        echo "Cache cleaned."
+    fi
+    ((current_step++))
+    echo "Cache cleaned: $((current_step * 100 / total_steps))%"
+
+    echo "Updating Flatpak..."
+    eval "flatpak update --noninteractive $redirect"
+    ((current_step++))
+    echo "Flatpak updated: $((current_step * 100 / total_steps))%"
+
+    echo "System upgrade complete!"
+}
+
+# Call the main function automatically
+arch-upgrade "$@"
